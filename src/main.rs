@@ -100,7 +100,7 @@ impl HelloTriangleApplication {
             .application_version(vk::make_api_version(1, 0, 0, 0))
             .engine_name(CString::new("No Engine").unwrap().as_c_str())
             .engine_version(vk::make_api_version(1, 0, 0, 0))
-            .api_version(vk::make_api_version(1, 0, 0, 0))
+            .api_version(vk::make_api_version(0, 1, 3, 0))
             .build();
 
         let mut surface_extensions = ash_window::enumerate_required_extensions(&window).unwrap();
