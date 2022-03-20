@@ -1,15 +1,11 @@
-use std::{
-    error::Error,
-    ffi::{c_void, CStr, CString},
-};
+mod debug;
+
+use crate::debug::VulkanDebugger;
+
+use std::{error::Error, ffi::CString};
 
 use ash::{
-    extensions::ext::DebugUtils,
-    vk::{
-        self, DebugUtilsMessageSeverityFlagsEXT, DebugUtilsMessageTypeFlagsEXT,
-        DebugUtilsMessengerCallbackDataEXT, DebugUtilsMessengerCreateInfoEXT,
-        DebugUtilsMessengerEXT, PhysicalDeviceType, QueueFamilyProperties,
-    },
+    vk::{self, PhysicalDeviceType, QueueFamilyProperties},
     Entry, Instance,
 };
 use winit::{
@@ -23,15 +19,11 @@ use winit::{
 const WIDTH: f64 = 800.0;
 const HEIGHT: f64 = 600.0;
 
-const VALIDATION_LAYERS: [&str; 1] = ["VK_LAYER_KHRONOS_validation"];
-
-const SHOULD_INCLUDE_VALIDATION_LAYERS: bool = cfg!(debug_assertions);
-
 pub struct HelloTriangleApplication {
-    _entry: Entry,
+    entry: Entry,
     event_loop: EventLoop<()>,
     instance: Instance,
-    debug_utils_messenger: Option<DebugUtilsMessengerEXT>,
+    debugger: Option<VulkanDebugger>,
     device: ash::Device,
     _queue: vk::Queue,
     _window: Window,
@@ -44,11 +36,11 @@ impl HelloTriangleApplication {
 
         let instance = Self::init_vulkan(&entry, &window)?;
 
-        let debug_utils_messenger = if SHOULD_INCLUDE_VALIDATION_LAYERS {
-            Some(Self::init_debug_messenger(&entry, &instance))
-        } else {
-            None
+        let debugger = match VulkanDebugger::new(&entry, &instance) {
+            Some(d) => Some(d?),
+            None => None,
         };
+
         let physical_device = Self::pick_physical_device(&instance)
             .ok_or("Unable to find suitable physical device")?;
 
@@ -59,27 +51,14 @@ impl HelloTriangleApplication {
         let queue = unsafe { device.get_device_queue(index as u32, 0) };
 
         Ok(Self {
-            _entry: entry,
+            entry,
             event_loop,
             instance,
-            debug_utils_messenger,
+            debugger,
             device,
             _queue: queue,
             _window: window,
         })
-    }
-
-    unsafe extern "system" fn vulkan_debug_callback(
-        _message_severity: DebugUtilsMessageSeverityFlagsEXT,
-        _message_types: DebugUtilsMessageTypeFlagsEXT,
-        p_callback_data: *const DebugUtilsMessengerCallbackDataEXT,
-        _p_data: *mut c_void,
-    ) -> vk::Bool32 {
-        let message_pointer = (*p_callback_data).p_message;
-        let message = CStr::from_ptr(message_pointer);
-        println!("Validation layer: {:?}", message);
-
-        vk::FALSE
     }
 
     fn create_logical_device(
@@ -88,13 +67,8 @@ impl HelloTriangleApplication {
     ) -> Result<ash::Device, vk::Result> {
         let (index, _) = Self::find_queue_families(instance, &device).unwrap();
 
-        let layer_names = match SHOULD_INCLUDE_VALIDATION_LAYERS {
-            true => VALIDATION_LAYERS
-                .iter()
-                .filter_map(|string| CString::new(*string).ok())
-                .collect::<Vec<_>>(),
-            false => vec![],
-        };
+        let mut layer_names = vec![];
+        VulkanDebugger::add_necessary_layers(&mut layer_names);
 
         let layer_names_raw = layer_names
             .iter()
@@ -142,29 +116,6 @@ impl HelloTriangleApplication {
         })
     }
 
-    fn create_debug_messenger_create_info() -> DebugUtilsMessengerCreateInfoEXT {
-        vk::DebugUtilsMessengerCreateInfoEXT::builder()
-            .message_severity(
-                vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
-                    | vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
-            )
-            .message_type(
-                vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
-                    | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE
-                    | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION,
-            )
-            .pfn_user_callback(Some(Self::vulkan_debug_callback))
-            .build()
-    }
-
-    fn init_debug_messenger(entry: &Entry, instance: &Instance) -> DebugUtilsMessengerEXT {
-        let debug_messenger_info = Self::create_debug_messenger_create_info();
-
-        let debug_utils_loader = DebugUtils::new(entry, instance);
-        unsafe { debug_utils_loader.create_debug_utils_messenger(&debug_messenger_info, None) }
-            .unwrap()
-    }
-
     fn init_vulkan(entry: &Entry, window: &Window) -> Result<Instance, vk::Result> {
         let app_info = vk::ApplicationInfo::builder()
             .application_name(CString::new("Hello Triangle").unwrap().as_c_str())
@@ -176,22 +127,15 @@ impl HelloTriangleApplication {
 
         let mut surface_extensions = ash_window::enumerate_required_extensions(&window).unwrap();
 
-        if SHOULD_INCLUDE_VALIDATION_LAYERS {
-            surface_extensions.push(ash::extensions::ext::DebugUtils::name())
-        }
+        VulkanDebugger::add_necessary_extensions(&mut surface_extensions);
 
         let extension_names_raw = surface_extensions
             .iter()
             .map(|ext| ext.as_ptr())
             .collect::<Vec<_>>();
 
-        let layer_names = match SHOULD_INCLUDE_VALIDATION_LAYERS {
-            true => VALIDATION_LAYERS
-                .iter()
-                .filter_map(|string| CString::new(*string).ok())
-                .collect::<Vec<_>>(),
-            false => vec![],
-        };
+        let mut layer_names = vec![];
+        VulkanDebugger::add_necessary_layers(&mut layer_names);
 
         let layer_names_raw = layer_names
             .iter()
@@ -203,13 +147,11 @@ impl HelloTriangleApplication {
             .enabled_extension_names(&extension_names_raw)
             .enabled_layer_names(&layer_names_raw);
 
-        let mut debug_messenger_create_info = Self::create_debug_messenger_create_info();
+        let debug_create_info = VulkanDebugger::get_debug_messenger_info();
 
-        let instance_create_info = match SHOULD_INCLUDE_VALIDATION_LAYERS {
-            true => instance_create_info_builder
-                .push_next(&mut debug_messenger_create_info)
-                .build(),
-            false => instance_create_info_builder.build(),
+        let instance_create_info = match debug_create_info {
+            None => instance_create_info_builder.build(),
+            Some(mut d) => instance_create_info_builder.push_next(&mut d).build(),
         };
 
         unsafe { entry.create_instance(&instance_create_info, None) }
@@ -246,14 +188,10 @@ impl HelloTriangleApplication {
 
 impl Drop for HelloTriangleApplication {
     fn drop(&mut self) {
-        if let Some(debug_utils_messenger) = self.debug_utils_messenger {
-            let debug_utils_loader = DebugUtils::new(&self._entry, &self.instance);
-            unsafe {
-                debug_utils_loader.destroy_debug_utils_messenger(debug_utils_messenger, None)
-            };
+        if let Some(debugger) = &self.debugger {
+            debugger.clean_up(&self.entry, &self.instance)
         }
         unsafe { self.device.destroy_device(None) }
         unsafe { self.instance.destroy_instance(None) }
-        println!("We are closing the program!")
     }
 }
